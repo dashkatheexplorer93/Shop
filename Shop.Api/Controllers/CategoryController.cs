@@ -1,21 +1,27 @@
+using AutoMapper;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Shop.Contract.Requests;
+using Shop.Contract.Responses;
 using Shop.Data;
 using Shop.Data.Entities;
 
 namespace Shop.Api.Controllers;
 
+[ApiVersion("1.0")]
 [ApiController]
-[Route("api/[controller]")]
-public class CategoryController(ShopContext context) : ControllerBase
+[Route("api/V{version:apiVersion}/[controller]")]
+public class CategoryController(ShopContext context, IMapper mapper) : ControllerBase
 {
     [HttpGet]
     [ProducesResponseType(typeof(IEnumerable<Category>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IEnumerable<Category>>> GetCategories()
     {
-        return await context.Categories
+        var categories = await context.Categories
             .Include(c => c.Products)
             .ToListAsync();
+    
+        return Ok(mapper.Map<IEnumerable<CategoryDto>>(categories));
     }
 
     [HttpGet("{id:int}")]
@@ -27,44 +33,37 @@ public class CategoryController(ShopContext context) : ControllerBase
             .Include(c => c.Products)
             .FirstOrDefaultAsync(c => c.CategoryId == id);
 
-        return category == null ? NotFound() : category;
+        if (category == null)
+            return NotFound();
+
+        return Ok(mapper.Map<CategoryDto>(category));
     }
 
     [HttpPost]
     [ProducesResponseType(typeof(Category), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<Category>> CreateCategory(Category category)
+    public async Task<ActionResult<Category>> CreateCategory(CreateCategoryDto createCategoryDto)
     {
-        if (!ModelState.IsValid)
-            return BadRequest(ModelState);
-
+        var category = mapper.Map<Category>(createCategoryDto);
         context.Categories.Add(category);
         await context.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(GetCategory), new { id = category.CategoryId }, category);
+        var categoryDto = mapper.Map<CategoryDto>(category);
+        return CreatedAtAction(nameof(GetCategory), new { id = category.CategoryId }, categoryDto);
     }
 
     [HttpPut("{id:int}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> UpdateCategory(int id, Category category)
+    public async Task<IActionResult> UpdateCategory(int id, CreateCategoryDto updateCategoryDto)
     {
-        if (id != category.CategoryId)
-            return BadRequest();
+        var category = await context.Categories.FindAsync(id);
+        if (category == null)
+            return NotFound();
 
-        context.Entry(category).State = EntityState.Modified;
-
-        try
-        {
-            await context.SaveChangesAsync();
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            if (!await context.Categories.AnyAsync(c => c.CategoryId == id))
-                return NotFound();
-            throw;
-        }
+        mapper.Map(updateCategoryDto, category);
+        await context.SaveChangesAsync();
 
         return NoContent();
     }
@@ -90,5 +89,4 @@ public class CategoryController(ShopContext context) : ControllerBase
 
         return NoContent();
     }
-
 }

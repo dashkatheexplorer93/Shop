@@ -1,86 +1,100 @@
+using AutoMapper;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Shop.Contract.Requests;
+using Shop.Contract.Responses;
 using Shop.Data;
 using Shop.Data.Entities;
 
 namespace Shop.Api.Controllers;
 
+[ApiVersion("1.0")]
 [ApiController]
-[Route("api/[controller]")]
-public class OrderItemController(ShopContext context) : ControllerBase
+[Route("api/V{version:apiVersion}/Order/{orderId:int}/items")]
+public class OrderItemController(ShopContext context, IMapper mapper) : ControllerBase
 {
     [HttpGet]
     [ProducesResponseType(typeof(IEnumerable<OrderItem>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<IEnumerable<OrderItem>>> GetOrderItems()
+    public async Task<ActionResult<IEnumerable<OrderItem>>> GetOrderItems(int orderId)
     {
-        return await context.OrderItems
+        var orderItems = await context.OrderItems
             .Include(oi => oi.Product)
-            .Include(oi => oi.Order)
+            .Where(oi => oi.OrderId == orderId)
             .ToListAsync();
+
+        return Ok(mapper.Map<IEnumerable<OrderItemDto>>(orderItems));
     }
 
     [HttpGet("{id:int}")]
     [ProducesResponseType(typeof(OrderItem), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<OrderItem>> GetOrderItem(int id)
+    public async Task<ActionResult<OrderItemDto>> GetOrderItem(int orderId, int id)
     {
         var orderItem = await context.OrderItems
             .Include(oi => oi.Product)
-            .Include(oi => oi.Order)
-            .FirstOrDefaultAsync(oi => oi.OrderItemId == id);
+            .FirstOrDefaultAsync(oi => oi.OrderId == orderId && oi.OrderItemId == id);
 
-        return orderItem == null ? NotFound() : orderItem;
+        if (orderItem == null)
+            return NotFound();
+
+        return Ok(mapper.Map<OrderItemDto>(orderItem));
     }
 
     [HttpPost]
     [ProducesResponseType(typeof(OrderItem), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<OrderItem>> CreateOrderItem(OrderItem orderItem)
+    public async Task<ActionResult<OrderItemDto>> CreateOrderItem(int orderId, CreateOrderItemDto createOrderItemDto)
     {
-        if (!ModelState.IsValid)
-            return BadRequest(ModelState);
-
-        // Validate that referenced Product and Order exist
-        if (!await context.Products.AnyAsync(p => p.ProductId == orderItem.ProductId))
-            return BadRequest("Invalid ProductId");
-
-        if (!await context.Orders.AnyAsync(o => o.OrderId == orderItem.OrderId))
+        var order = await context.Orders.FindAsync(orderId);
+        if (order == null)
             return BadRequest("Invalid OrderId");
 
-        context.OrderItems.Add(orderItem);
-        await context.SaveChangesAsync();
+        var product = await context.Products.FindAsync(createOrderItemDto.ProductId);
+        if (product == null)
+            return BadRequest("Invalid ProductId");
 
-        return CreatedAtAction(nameof(GetOrderItem), new { id = orderItem.OrderItemId }, orderItem);
+        var orderItem = mapper.Map<OrderItem>(createOrderItemDto);
+        orderItem.OrderId = orderId;
+        orderItem.Price = product.Price;
+
+        context.OrderItems.Add(orderItem);
+        
+        order.TotalPrice += orderItem.Price * orderItem.Quantity;
+
+        await context.SaveChangesAsync();
+        
+        await context.Entry(orderItem)
+            .Reference(oi => oi.Product)
+            .LoadAsync();
+
+        return CreatedAtAction(nameof(GetOrderItem), 
+            new { orderId, id = orderItem.OrderItemId }, 
+            mapper.Map<OrderItemDto>(orderItem));
     }
 
     [HttpPut("{id:int}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> UpdateOrderItem(int id, OrderItem orderItem)
+    public async Task<IActionResult> UpdateOrderItem(int orderId, int id, CreateOrderItemDto updateOrderItemDto)
     {
-        if (id != orderItem.OrderItemId)
-            return BadRequest();
+        var orderItem = await context.OrderItems
+            .FirstOrDefaultAsync(oi => oi.OrderId == orderId && oi.OrderItemId == id);
+        if (orderItem == null)
+            return NotFound();
 
-        // Validate that referenced Product and Order exist
-        if (!await context.Products.AnyAsync(p => p.ProductId == orderItem.ProductId))
+        var product = await context.Products.FindAsync(updateOrderItemDto.ProductId);
+        if (product == null)
             return BadRequest("Invalid ProductId");
 
-        if (!await context.Orders.AnyAsync(o => o.OrderId == orderItem.OrderId))
-            return BadRequest("Invalid OrderId");
+        var oldTotal = orderItem.Price * orderItem.Quantity;
+        mapper.Map(updateOrderItemDto, orderItem);
+        orderItem.Price = product.Price;
 
-        context.Entry(orderItem).State = EntityState.Modified;
+        var order = await context.Orders.FindAsync(orderId);
+        order!.TotalPrice = order.TotalPrice - oldTotal + (orderItem.Price * orderItem.Quantity);
 
-        try
-        {
-            await context.SaveChangesAsync();
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            if (!await context.OrderItems.AnyAsync(oi => oi.OrderItemId == id))
-                return NotFound();
-            throw;
-        }
+        await context.SaveChangesAsync();
 
         return NoContent();
     }
@@ -88,11 +102,15 @@ public class OrderItemController(ShopContext context) : ControllerBase
     [HttpDelete("{id:int}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> DeleteOrderItem(int id)
+    public async Task<IActionResult> DeleteOrderItem(int orderId, int id)
     {
-        var orderItem = await context.OrderItems.FindAsync(id);
+        var orderItem = await context.OrderItems
+            .FirstOrDefaultAsync(oi => oi.OrderId == orderId && oi.OrderItemId == id);
         if (orderItem == null)
             return NotFound();
+
+        var order = await context.Orders.FindAsync(orderId);
+        order!.TotalPrice -= orderItem.Price * orderItem.Quantity;
 
         context.OrderItems.Remove(orderItem);
         await context.SaveChangesAsync();
